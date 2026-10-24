@@ -1,66 +1,67 @@
-FROM php:8.4-apache
+FROM alpine:3.24
 
-# Install system dependencies and PHP extensions in one layer
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    git \
-    unzip \
-    libicu-dev \
+RUN apk upgrade --no-cache && \
+    apk add --no-cache \
+    apache2 \
+    php85 \
+    php85-apache2 \
+    php85-curl \
+    php85-intl \
+    php85-phar \
+    php85-openssl \
+    php85-mbstring \
+    php85-iconv \
+    php85-ctype \
+    icu-data-full \
     inkscape \
-    fonts-dejavu-core \
-    curl \
-    && docker-php-ext-configure intl \
-    && docker-php-ext-install intl \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+    font-dejavu \
+    curl && \
+    ln -sf /usr/bin/php85 /usr/bin/php && \
+    sed -i -e 's|^#LoadModule rewrite_module|LoadModule rewrite_module|' \
+    -e 's|^#LoadModule headers_module|LoadModule headers_module|' \
+    -e 's|^ServerTokens .*|ServerTokens Prod|' \
+    -e 's|^ServerSignature .*|ServerSignature Off|' \
+    -e 's|^ErrorLog .*|ErrorLog /dev/stderr|' \
+    -e 's|^\(\s*\)CustomLog .*|\1CustomLog /dev/stdout combined|' \
+    /etc/apache2/httpd.conf
 
-# Install Composer
-COPY --from=composer/composer:latest-bin@sha256:c9bda63056674836406cacfbbdd8ef770fb4692ac419c967034225213c64e11b /composer /usr/bin/composer
+COPY --from=composer/composer:latest-bin@sha256:016c41066558559142758092f7ef286d66ae113df23d49e086fdda0166dd5f01 /composer /usr/bin/composer
 
-# Set working directory
 WORKDIR /var/www/html
 
-# Copy composer files and install dependencies
 COPY composer.json composer.lock ./
 COPY src/ ./src/
 RUN composer install --no-dev --optimize-autoloader --no-scripts
 
-# Configure Apache to serve from src/ directory and pass environment variables
-RUN a2enmod rewrite headers && \
-    echo 'ServerTokens Prod\n\
-    ServerSignature Off\n\
-    PassEnv TOKEN\n\
-    PassEnv WHITELIST\n\
-    <VirtualHost *:80>\n\
-    ServerAdmin webmaster@localhost\n\
-    DocumentRoot /var/www/html/src\n\
-    <Directory /var/www/html/src>\n\
-    Options -Indexes\n\
-    AllowOverride None\n\
-    Require all granted\n\
-    Header always set Access-Control-Allow-Origin "*"\n\
-    Header always set Content-Type "image/svg+xml" "expr=%{REQUEST_URI} =~ m#\\.svg$#i"\n\
-    Header always set Content-Security-Policy "default-src 'none'; style-src 'unsafe-inline'; img-src data:;" "expr=%{REQUEST_URI} =~ m#\\.svg$#i"\n\
-    Header always set Referrer-Policy "no-referrer-when-downgrade"\n\
-    Header always set X-Content-Type-Options "nosniff"\n\
-    </Directory>\n\
-    ErrorLog ${APACHE_LOG_DIR}/error.log\n\
-    CustomLog ${APACHE_LOG_DIR}/access.log combined\n\
-    </VirtualHost>' > /etc/apache2/sites-available/000-default.conf
+COPY <<'EOF' /etc/apache2/conf.d/zz-streak.conf
+ServerName localhost
+PassEnv TOKEN
+PassEnv WHITELIST
+<VirtualHost *:80>
+    DocumentRoot /var/www/html/src
+    <Directory /var/www/html/src>
+        Options -Indexes
+        AllowOverride None
+        Require all granted
+        DirectoryIndex index.php
+        Header always set Access-Control-Allow-Origin "*"
+        Header always set Content-Type "image/svg+xml" "expr=%{REQUEST_URI} =~ m#\.svg$#i"
+        Header always set Content-Security-Policy "default-src 'none'; style-src 'unsafe-inline'; img-src data:;" "expr=%{REQUEST_URI} =~ m#\.svg$#i"
+        Header always set Referrer-Policy "no-referrer-when-downgrade"
+        Header always set X-Content-Type-Options "nosniff"
+    </Directory>
+</VirtualHost>
+EOF
 
-RUN mkdir -p /var/www/html/cache
-
-# Set secure permissions (cache dir needs write access for www-data)
-RUN chown -R www-data:www-data /var/www/html && \
+RUN mkdir -p /var/www/html/cache && \
+    chown -R apache:apache /var/www/html && \
     find /var/www/html -type d -exec chmod 755 {} \; && \
     find /var/www/html -type f -exec chmod 644 {} \; && \
     chmod 775 /var/www/html/cache
 
-# Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost/demo/ || exit 1
 
-# Expose port
 EXPOSE 80
 
-# Start Apache
-CMD ["apache2-foreground"]
+CMD ["httpd", "-D", "FOREGROUND"]
